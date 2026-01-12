@@ -43,17 +43,20 @@ pub use index::{
 };
 pub use persistence::{
     // New split index API
-    exact_file, load_exact, load_exact_mmap, load_paths, load_paths_mmap, load_trigram,
-    load_trigram_mmap, paths_file, save_all, save_exact, save_paths, save_trigram, trigram_file,
-    validate_index_match,
+    exact_file, exact_lower_file, load_exact, load_exact_mmap, load_paths, load_paths_mmap,
+    load_trigram, load_trigram_mmap, paths_file, save_all, save_exact, save_paths, save_trigram,
+    trigram_file, validate_index_match,
     // Legacy single-file API (deprecated)
     index_exists, load_index, load_index_mmap, save_index,
 };
-pub use query::{query, query_exact, query_fuzzy, query_with_options, QueryOptions, QueryResult};
+pub use query::{
+    query, query_exact, query_exact_lower, query_fuzzy, query_with_options, QueryOptions,
+    QueryResult,
+};
 pub use scanner::{scan_and_build_indexes, scan_and_index, ScanConfig};
 pub use tokenizer::{
     extract_exact_tokens_from_file, hash_token, tokenize, tokenize_exact, tokenize_query,
-    tokenize_query_exact, MIN_TOKEN_LENGTH,
+    tokenize_query_exact, tokenize_query_exact_lower, MIN_TOKEN_LENGTH,
 };
 pub use trigram::{
     extract_query_trigrams, extract_trigrams, extract_trigrams_from_file, pack_trigram,

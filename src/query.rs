@@ -1,5 +1,5 @@
 use crate::index::{ExactTokenIndex, PathIndex, TokenIndex, TrigramIndex};
-use crate::tokenizer::{tokenize_query, tokenize_query_exact};
+use crate::tokenizer::{tokenize_query, tokenize_query_exact, tokenize_query_exact_lower};
 use crate::trigram::extract_query_trigrams;
 use roaring::RoaringBitmap;
 use std::path::PathBuf;
@@ -137,6 +137,55 @@ pub fn query_exact(
     let bitmaps: Vec<&RoaringBitmap> = token_hashes
         .iter()
         .filter_map(|hash| exact_index.get_bitmap(*hash))
+        .collect();
+
+    let matched_token_count = bitmaps.len();
+
+    if bitmaps.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count,
+            matched_token_count: 0,
+        };
+    }
+
+    let result = if options.match_all {
+        intersect_bitmaps(&bitmaps)
+    } else {
+        union_bitmaps(&bitmaps)
+    };
+
+    let files = resolve_file_ids(path_index, &result, options);
+
+    QueryResult {
+        files,
+        query_token_count,
+        matched_token_count,
+    }
+}
+
+/// Execute a case-insensitive exact mode query
+pub fn query_exact_lower(
+    path_index: &PathIndex,
+    exact_lower_index: &ExactTokenIndex,
+    query_str: &str,
+    options: &QueryOptions,
+) -> QueryResult {
+    let token_hashes = tokenize_query_exact_lower(query_str);
+    let query_token_count = token_hashes.len();
+
+    if token_hashes.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count: 0,
+            matched_token_count: 0,
+        };
+    }
+
+    // Collect bitmaps for each token
+    let bitmaps: Vec<&RoaringBitmap> = token_hashes
+        .iter()
+        .filter_map(|hash| exact_lower_index.get_bitmap(*hash))
         .collect();
 
     let matched_token_count = bitmaps.len();

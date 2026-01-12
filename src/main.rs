@@ -2,11 +2,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
 use tokenizer::{
-    exact_file, fmt_num, glob_files, index_exists, load_exact, load_exact_mmap, load_index,
-    load_index_mmap, load_paths, load_paths_mmap, load_trigram, load_trigram_mmap, paths_file,
-    query_exact, query_fuzzy, query_with_options, save_all, save_index, scan_and_build_indexes,
-    scan_and_index, trigram_file, validate_index_match, GlobOptions, QueryOptions, ScanConfig,
-    TokenizerError,
+    exact_file, exact_lower_file, fmt_num, glob_files, index_exists, load_exact, load_exact_mmap,
+    load_index, load_index_mmap, load_paths, load_paths_mmap, load_trigram, load_trigram_mmap,
+    paths_file, query_exact, query_exact_lower, query_fuzzy, query_with_options, save_all,
+    save_index, scan_and_build_indexes, scan_and_index, trigram_file, validate_index_match,
+    GlobOptions, QueryOptions, ScanConfig, TokenizerError,
 };
 
 #[derive(Parser)]
@@ -51,6 +51,7 @@ enum Commands {
     #[command(visible_alias = "q", after_help = "\
 Examples:
   tokenizer q Mannequin                      # exact match (default)
+  tokenizer q Mannequin -i                   # case-insensitive exact match
   tokenizer q Mannequin -f                   # fuzzy match
   tokenizer q \"bob dog\" -o                   # OR mode (either token)
   tokenizer q Mannequin -p src               # paths containing \"src\"
@@ -60,6 +61,10 @@ Examples:
     Query {
         /// Search query
         query: String,
+
+        /// Case-insensitive exact matching
+        #[arg(short = 'i', long = "ignore-case", conflicts_with = "fuzzy")]
+        ignore_case: bool,
 
         /// Use fuzzy matching (trigrams, case-insensitive). Default is exact match.
         #[arg(short = 'f', long)]
@@ -86,7 +91,7 @@ Examples:
         or_mode: bool,
 
         /// Index file path
-        #[arg(short, long, default_value = "index.tkix")]
+        #[arg(long, default_value = "index.tkix")]
         index: PathBuf,
 
         /// Use memory-mapped loading (faster for repeated queries)
@@ -141,6 +146,7 @@ fn main() {
 
         Commands::Query {
             query,
+            ignore_case,
             fuzzy,
             path,
             glob,
@@ -149,7 +155,7 @@ fn main() {
             or_mode,
             index,
             mmap,
-        } => cmd_query(index, query, limit, or_mode, mmap, fuzzy, path, glob, exclude),
+        } => cmd_query(index, query, limit, or_mode, mmap, ignore_case, fuzzy, path, glob, exclude),
 
         Commands::Stats { index } => cmd_stats(index),
 
@@ -189,7 +195,8 @@ fn cmd_index(
     config.max_file_size = max_size * 1024 * 1024;
 
     let start = Instant::now();
-    let (path_index, exact_index, trigram_index) = scan_and_build_indexes(&dir, &config)?;
+    let (path_index, exact_index, exact_lower_index, trigram_index) =
+        scan_and_build_indexes(&dir, &config)?;
     let index_time = start.elapsed();
 
     println!(
@@ -201,7 +208,13 @@ fn cmd_index(
     );
 
     let start = Instant::now();
-    save_all(&path_index, &exact_index, &trigram_index, &output)?;
+    save_all(
+        &path_index,
+        &exact_index,
+        &exact_lower_index,
+        &trigram_index,
+        &output,
+    )?;
     let save_time = start.elapsed();
 
     // Calculate total size
@@ -211,10 +224,13 @@ fn cmd_index(
     let exact_size = std::fs::metadata(exact_file(&output))
         .map(|m| m.len())
         .unwrap_or(0);
+    let exact_lower_size = std::fs::metadata(exact_lower_file(&output))
+        .map(|m| m.len())
+        .unwrap_or(0);
     let trigram_size = std::fs::metadata(trigram_file(&output))
         .map(|m| m.len())
         .unwrap_or(0);
-    let total_size = paths_size + exact_size + trigram_size;
+    let total_size = paths_size + exact_size + exact_lower_size + trigram_size;
 
     println!("Saved index files in {:.2}s:", save_time.as_secs_f64());
     println!(
@@ -226,6 +242,11 @@ fn cmd_index(
         "  {} ({:.2} MB)",
         exact_file(&output).display(),
         exact_size as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "  {} ({:.2} MB)",
+        exact_lower_file(&output).display(),
+        exact_lower_size as f64 / (1024.0 * 1024.0)
     );
     println!(
         "  {} ({:.2} MB)",
@@ -291,12 +312,14 @@ fn cmd_query(
     limit: Option<usize>,
     or_mode: bool,
     use_mmap: bool,
+    ignore_case: bool,
     fuzzy: bool,
     path: Option<String>,
     glob: Option<Vec<String>>,
     exclude: Option<String>,
 ) -> tokenizer::Result<()> {
     // Default to exact mode (fuzzy = false means exact)
+    // ignore_case uses the lowercase exact index
 
     // Check if we have the new split format or legacy format
     let has_split_format = paths_file(&index_path).exists();
@@ -367,21 +390,8 @@ fn cmd_query(
         exclude,
     };
 
-    let (result, mode_str, tokens_load_time) = if !fuzzy {
-        let start = Instant::now();
-        let exact_index = if use_mmap {
-            load_exact_mmap(&exact_file(&index_path))?
-        } else {
-            load_exact(&exact_file(&index_path))?
-        };
-        let load_time = start.elapsed();
-
-        // Validate index consistency
-        validate_index_match(&path_index.header, &exact_index.header)?;
-
-        let result = query_exact(&path_index, &exact_index, &query_str, &options);
-        (result, "exact", load_time)
-    } else {
+    let (result, mode_str, tokens_load_time) = if fuzzy {
+        // Fuzzy mode (trigrams)
         let start = Instant::now();
         let trigram_index = if use_mmap {
             load_trigram_mmap(&trigram_file(&index_path))?
@@ -395,6 +405,36 @@ fn cmd_query(
 
         let result = query_fuzzy(&path_index, &trigram_index, &query_str, &options);
         (result, "fuzzy", load_time)
+    } else if ignore_case {
+        // Case-insensitive exact mode
+        let start = Instant::now();
+        let exact_lower_index = if use_mmap {
+            load_exact_mmap(&exact_lower_file(&index_path))?
+        } else {
+            load_exact(&exact_lower_file(&index_path))?
+        };
+        let load_time = start.elapsed();
+
+        // Validate index consistency
+        validate_index_match(&path_index.header, &exact_lower_index.header)?;
+
+        let result = query_exact_lower(&path_index, &exact_lower_index, &query_str, &options);
+        (result, "exact-i", load_time)
+    } else {
+        // Case-sensitive exact mode (default)
+        let start = Instant::now();
+        let exact_index = if use_mmap {
+            load_exact_mmap(&exact_file(&index_path))?
+        } else {
+            load_exact(&exact_file(&index_path))?
+        };
+        let load_time = start.elapsed();
+
+        // Validate index consistency
+        validate_index_match(&path_index.header, &exact_index.header)?;
+
+        let result = query_exact(&path_index, &exact_index, &query_str, &options);
+        (result, "exact", load_time)
     };
 
     let total_load_time = paths_load_time + tokens_load_time;

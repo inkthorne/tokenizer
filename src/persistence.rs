@@ -107,9 +107,10 @@ pub const MAGIC_PATHS: &[u8; 4] = b"TKIP";
 pub const MAGIC_EXACT: &[u8; 4] = b"TKIE";
 pub const MAGIC_TRIGRAM: &[u8; 4] = b"TKIT";
 
-/// File extensions for the three index files
+/// File extensions for the index files
 pub const EXT_PATHS: &str = "paths";
 pub const EXT_EXACT: &str = "exact";
+pub const EXT_EXACT_LOWER: &str = "exacti";
 pub const EXT_TRIGRAM: &str = "tri";
 
 /// Get the paths file path from base path
@@ -120,6 +121,11 @@ pub fn paths_file(base: &Path) -> std::path::PathBuf {
 /// Get the exact tokens file path from base path
 pub fn exact_file(base: &Path) -> std::path::PathBuf {
     base.with_extension(EXT_EXACT)
+}
+
+/// Get the case-insensitive exact tokens file path from base path
+pub fn exact_lower_file(base: &Path) -> std::path::PathBuf {
+    base.with_extension(EXT_EXACT_LOWER)
 }
 
 /// Get the trigram file path from base path
@@ -209,11 +215,13 @@ pub fn save_trigram(index: &TrigramIndex, path: &Path) -> Result<()> {
 pub fn save_all(
     paths: &PathIndex,
     exact: &ExactTokenIndex,
+    exact_lower: &ExactTokenIndex,
     trigram: &TrigramIndex,
     base_path: &Path,
 ) -> Result<()> {
     save_paths(paths, &paths_file(base_path))?;
     save_exact(exact, &exact_file(base_path))?;
+    save_exact(exact_lower, &exact_lower_file(base_path))?;
     save_trigram(trigram, &trigram_file(base_path))?;
     Ok(())
 }

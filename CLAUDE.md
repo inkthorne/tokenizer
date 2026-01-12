@@ -24,6 +24,7 @@ tokenizer index --dir ./src --extensions rs,py,js --output my.tkix
 tokenizer q "async tokio runtime"
 
 # Query with options
+tokenizer q Mannequin -i              # case-insensitive exact match
 tokenizer q Mannequin -f              # fuzzy match (trigrams)
 tokenizer q "bob dog" -o              # OR mode (match either token)
 tokenizer q Mannequin -p src          # filter paths containing "src"
@@ -38,13 +39,14 @@ tokenizer stats
 **Query flags:**
 | Short | Long | Description |
 |-------|------|-------------|
+| `-i` | `--ignore-case` | Case-insensitive exact match |
 | `-f` | `--fuzzy` | Fuzzy match (trigrams, case-insensitive) |
 | `-o` | `--or` | OR mode (match any token) |
 | `-p` | `--path` | Filter paths containing substring |
 | `-g` | `--glob` | Filter by glob patterns (comma-separated) |
 | `-x` | `--exclude` | Exclude paths containing substring |
 | `-l` | `--limit` | Max results to return |
-| `-i` | `--index` | Index file path (default: index.tkix) |
+| | `--index` | Index file path (default: index.tkix) |
 
 ## Architecture
 

@@ -25,6 +25,16 @@ pub fn hash_token(token: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// Hash a token using FxHash (case-insensitive, lowercase)
+#[inline]
+pub fn hash_token_lower(token: &[u8]) -> u64 {
+    let mut hasher = FxHasher::default();
+    for &byte in token {
+        hasher.write_u8(byte.to_ascii_lowercase());
+    }
+    hasher.finish()
+}
+
 /// Iterator that yields token hashes from content
 pub struct TokenIterator<'a> {
     content: &'a [u8],
@@ -218,6 +228,104 @@ pub fn tokenize_exact(content: &[u8]) -> impl Iterator<Item = u64> + '_ {
 /// Tokenize a string query in exact mode
 pub fn tokenize_query_exact(query: &str) -> Vec<u64> {
     tokenize_exact(query.as_bytes()).collect()
+}
+
+// ============================================================================
+// Case-Insensitive Exact Mode Tokenizer
+// ============================================================================
+
+/// Iterator that yields case-insensitive exact-mode token hashes
+pub struct ExactTokenLowerIterator<'a> {
+    content: &'a [u8],
+    position: usize,
+}
+
+impl<'a> ExactTokenLowerIterator<'a> {
+    pub fn new(content: &'a [u8]) -> Self {
+        Self {
+            content,
+            position: 0,
+        }
+    }
+
+    #[inline]
+    fn skip_delimiters(&mut self) {
+        while self.position < self.content.len() && is_exact_delimiter(self.content[self.position])
+        {
+            self.position += 1;
+        }
+    }
+
+    #[inline]
+    fn read_token(&mut self) -> Option<&'a [u8]> {
+        let start = self.position;
+
+        while self.position < self.content.len()
+            && is_exact_token_char(self.content[self.position])
+        {
+            self.position += 1;
+        }
+
+        if self.position > start {
+            Some(&self.content[start..self.position])
+        } else {
+            if self.position < self.content.len() {
+                self.position += 1;
+            }
+            None
+        }
+    }
+}
+
+impl<'a> Iterator for ExactTokenLowerIterator<'a> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            self.skip_delimiters();
+
+            if self.position >= self.content.len() {
+                return None;
+            }
+
+            if let Some(token) = self.read_token() {
+                if token.len() >= MIN_TOKEN_LENGTH {
+                    return Some(hash_token_lower(token));
+                }
+            }
+        }
+    }
+}
+
+/// Extract case-insensitive exact-mode tokens from a byte slice
+pub fn tokenize_exact_lower(content: &[u8]) -> impl Iterator<Item = u64> + '_ {
+    ExactTokenLowerIterator::new(content)
+}
+
+/// Tokenize a string query in case-insensitive exact mode
+pub fn tokenize_query_exact_lower(query: &str) -> Vec<u64> {
+    tokenize_exact_lower(query.as_bytes()).collect()
+}
+
+/// Extract unique case-insensitive exact-mode token hashes from a file
+pub fn extract_exact_tokens_lower_from_file(path: &Path) -> std::io::Result<Vec<u64>> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+
+    if metadata.len() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // Check for binary file (null bytes in first 8KB)
+    let check_len = std::cmp::min(8192, mmap.len());
+    if mmap[..check_len].contains(&0) {
+        return Ok(Vec::new());
+    }
+
+    let unique_tokens: FxHashSet<u64> = tokenize_exact_lower(&mmap[..]).collect();
+    Ok(unique_tokens.into_iter().collect())
 }
 
 /// Extract unique exact-mode token hashes from a file

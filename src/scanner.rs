@@ -1,7 +1,7 @@
 use crate::error::{Result, TokenizerError};
 use crate::fmt_num;
 use crate::index::{ExactTokenIndex, IndexHeader, PathIndex, TokenIndex, TrigramIndex};
-use crate::tokenizer::{extract_exact_tokens_from_file, extract_tokens_from_file};
+use crate::tokenizer::{extract_exact_tokens_from_file, extract_exact_tokens_lower_from_file, extract_tokens_from_file};
 use crate::trigram::extract_trigrams_from_file;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
@@ -17,6 +17,7 @@ use walkdir::WalkDir;
 struct FileProcessingResult {
     file_id: u32,
     exact_tokens: Vec<u64>,
+    exact_lower_tokens: Vec<u64>,
     trigrams: Vec<u32>,
 }
 
@@ -137,11 +138,13 @@ fn walk_and_send(
 /// Process a single file and extract tokens + trigrams
 fn process_single_file(file_id: u32, path: &Path) -> FileProcessingResult {
     let exact_tokens = extract_exact_tokens_from_file(path).unwrap_or_default();
+    let exact_lower_tokens = extract_exact_tokens_lower_from_file(path).unwrap_or_default();
     let trigrams = extract_trigrams_from_file(path).unwrap_or_default();
 
     FileProcessingResult {
         file_id,
         exact_tokens,
+        exact_lower_tokens,
         trigrams,
     }
 }
@@ -150,13 +153,21 @@ fn process_single_file(file_id: u32, path: &Path) -> FileProcessingResult {
 fn merge_results(
     rx: mpsc::Receiver<FileProcessingResult>,
     header: IndexHeader,
-) -> (ExactTokenIndex, TrigramIndex) {
+) -> (ExactTokenIndex, ExactTokenIndex, TrigramIndex) {
     let mut exact_map: FxHashMap<u64, RoaringBitmap> = FxHashMap::default();
+    let mut exact_lower_map: FxHashMap<u64, RoaringBitmap> = FxHashMap::default();
     let mut trigram_map: FxHashMap<u32, RoaringBitmap> = FxHashMap::default();
 
     for result in rx {
         for token_hash in result.exact_tokens {
             exact_map
+                .entry(token_hash)
+                .or_insert_with(RoaringBitmap::new)
+                .insert(result.file_id);
+        }
+
+        for token_hash in result.exact_lower_tokens {
+            exact_lower_map
                 .entry(token_hash)
                 .or_insert_with(RoaringBitmap::new)
                 .insert(result.file_id);
@@ -173,13 +184,16 @@ fn merge_results(
     let mut exact_index = ExactTokenIndex::new(header.clone());
     exact_index.token_map = exact_map;
 
+    let mut exact_lower_index = ExactTokenIndex::new(header.clone());
+    exact_lower_index.token_map = exact_lower_map;
+
     let mut trigram_index = TrigramIndex::new(header);
     trigram_index.trigram_map = trigram_map;
 
-    (exact_index, trigram_index)
+    (exact_index, exact_lower_index, trigram_index)
 }
 
-/// Scan a directory and build all three index types (paths, exact tokens, trigrams)
+/// Scan a directory and build all four index types (paths, exact, exact-lower, trigrams)
 ///
 /// Uses a streaming pipeline that processes files as they're discovered,
 /// rather than collecting all files first. This provides better performance
@@ -187,7 +201,7 @@ fn merge_results(
 pub fn scan_and_build_indexes(
     root: &Path,
     config: &ScanConfig,
-) -> Result<(PathIndex, ExactTokenIndex, TrigramIndex)> {
+) -> Result<(PathIndex, ExactTokenIndex, ExactTokenIndex, TrigramIndex)> {
     // Create shared header with same index_id for all three files
     let header = IndexHeader::new();
 
@@ -245,9 +259,9 @@ pub fn scan_and_build_indexes(
         .map_err(|_| TokenizerError::WalkDir("Walker thread panicked".to_string()))??;
 
     // Collect and merge all results into final indexes
-    let (exact_index, trigram_index) = merge_results(result_rx, header);
+    let (exact_index, exact_lower_index, trigram_index) = merge_results(result_rx, header);
 
-    Ok((path_index, exact_index, trigram_index))
+    Ok((path_index, exact_index, exact_lower_index, trigram_index))
 }
 
 /// Collect all files matching the configuration
@@ -391,7 +405,7 @@ mod tests {
 
         // Build all three indexes
         let config = ScanConfig::default();
-        let (path_index, exact_index, trigram_index) =
+        let (path_index, exact_index, _exact_lower_index, trigram_index) =
             scan_and_build_indexes(temp_dir.path(), &config).unwrap();
 
         let options = QueryOptions {
@@ -438,7 +452,7 @@ mod tests {
 
         // Build all three indexes
         let config = ScanConfig::default();
-        let (path_index, exact_index, trigram_index) =
+        let (path_index, exact_index, _exact_lower_index, trigram_index) =
             scan_and_build_indexes(temp_dir.path(), &config).unwrap();
 
         let options = QueryOptions {
