@@ -2,10 +2,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
 use tokenizer::{
-    exact_file, glob_files, index_exists, load_exact, load_exact_mmap, load_index, load_index_mmap,
-    load_paths, load_paths_mmap, load_trigram, load_trigram_mmap, paths_file, query_exact,
-    query_fuzzy, query_with_options, save_all, save_index, scan_and_build_indexes, scan_and_index,
-    trigram_file, validate_index_match, GlobOptions, QueryOptions, ScanConfig, TokenizerError,
+    exact_file, fmt_num, glob_files, index_exists, load_exact, load_exact_mmap, load_index,
+    load_index_mmap, load_paths, load_paths_mmap, load_trigram, load_trigram_mmap, paths_file,
+    query_exact, query_fuzzy, query_with_options, save_all, save_index, scan_and_build_indexes,
+    scan_and_index, trigram_file, validate_index_match, GlobOptions, QueryOptions, ScanConfig,
+    TokenizerError,
 };
 
 #[derive(Parser)]
@@ -174,9 +175,9 @@ fn cmd_index(
 
     println!(
         "Indexed {} files ({} exact tokens, {} trigrams) in {:.2}s",
-        path_index.file_count(),
-        exact_index.token_count(),
-        trigram_index.trigram_count(),
+        fmt_num(path_index.file_count()),
+        fmt_num(exact_index.token_count()),
+        fmt_num(trigram_index.trigram_count()),
         index_time.as_secs_f64()
     );
 
@@ -244,8 +245,8 @@ fn cmd_index_legacy(
 
     println!(
         "Indexed {} files with {} unique tokens in {:.2}s",
-        index.file_count(),
-        index.token_count(),
+        fmt_num(index.file_count()),
+        fmt_num(index.token_count()),
         index_time.as_secs_f64()
     );
 
@@ -313,11 +314,11 @@ fn cmd_query(
 
         println!(
             "Query: \"{}\" ({} tokens, {} matched)",
-            query_str, result.query_token_count, result.matched_token_count
+            query_str, fmt_num(result.query_token_count), fmt_num(result.matched_token_count)
         );
         println!(
             "Found {} files in {:.3}ms (load: {:.3}ms)",
-            result.files.len(),
+            fmt_num(result.files.len()),
             query_time.as_secs_f64() * 1000.0,
             load_time.as_secs_f64() * 1000.0
         );
@@ -378,11 +379,11 @@ fn cmd_query(
 
     println!(
         "Query ({}): \"{}\" ({} tokens, {} matched)",
-        mode_str, query_str, result.query_token_count, result.matched_token_count
+        mode_str, query_str, fmt_num(result.query_token_count), fmt_num(result.matched_token_count)
     );
     println!(
         "Found {} files in {:.3}ms (load: {:.3}ms)",
-        result.files.len(),
+        fmt_num(result.files.len()),
         0.0, // Query time is fast, not separately tracked
         total_load_time.as_secs_f64() * 1000.0
     );
@@ -403,8 +404,8 @@ fn cmd_stats(index_path: PathBuf) -> tokenizer::Result<()> {
         println!("Index Statistics (New Format)");
         println!("==============================");
         println!("Root path:     {}", path_index.root_path.display());
-        println!("Files:         {}", path_index.file_count());
-        println!("Directories:   {}", path_index.directory_count());
+        println!("Files:         {}", fmt_num(path_index.file_count()));
+        println!("Directories:   {}", fmt_num(path_index.directory_count()));
         println!(
             "Created:       {} (unix timestamp)",
             path_index.header.created_at
@@ -413,10 +414,10 @@ fn cmd_stats(index_path: PathBuf) -> tokenizer::Result<()> {
 
         // Load and show token counts
         if let Ok(exact_index) = load_exact(&exact_file(&index_path)) {
-            println!("Exact tokens:  {}", exact_index.token_count());
+            println!("Exact tokens:  {}", fmt_num(exact_index.token_count()));
         }
         if let Ok(trigram_index) = load_trigram(&trigram_file(&index_path)) {
-            println!("Trigrams:      {}", trigram_index.trigram_count());
+            println!("Trigrams:      {}", fmt_num(trigram_index.trigram_count()));
         }
 
         // File sizes
@@ -469,8 +470,8 @@ fn cmd_stats(index_path: PathBuf) -> tokenizer::Result<()> {
     println!("=================================");
     println!("Version:       {}", metadata.version);
     println!("Root path:     {}", metadata.root_path.display());
-    println!("Files:         {}", metadata.file_count);
-    println!("Unique tokens: {}", metadata.token_count);
+    println!("Files:         {}", fmt_num(metadata.file_count));
+    println!("Unique tokens: {}", fmt_num(metadata.token_count));
     println!(
         "Index size:    {:.2} MB",
         file_size as f64 / (1024.0 * 1024.0)
@@ -503,11 +504,11 @@ fn cmd_glob(
 
         println!(
             "Pattern: \"{}\" (scanned {} files)",
-            result.pattern, result.files_scanned
+            result.pattern, fmt_num(result.files_scanned)
         );
         println!(
             "Found {} files in {:.3}ms (load: {:.3}ms)",
-            result.files.len(),
+            fmt_num(result.files.len()),
             glob_time.as_secs_f64() * 1000.0,
             load_time.as_secs_f64() * 1000.0
         );
@@ -542,11 +543,11 @@ fn cmd_glob(
 
     println!(
         "Pattern: \"{}\" (scanned {} files)",
-        result.pattern, result.files_scanned
+        result.pattern, fmt_num(result.files_scanned)
     );
     println!(
         "Found {} files in {:.3}ms (load: {:.3}ms)",
-        result.files.len(),
+        fmt_num(result.files.len()),
         glob_time.as_secs_f64() * 1000.0,
         load_time.as_secs_f64() * 1000.0
     );

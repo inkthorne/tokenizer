@@ -59,3 +59,16 @@ pub use trigram::{
     extract_query_trigrams, extract_trigrams, extract_trigrams_from_file, pack_trigram,
     unpack_trigram, MIN_TRIGRAM_TOKEN_LENGTH,
 };
+
+/// Format a number with thousand separators (e.g., 1234567 -> "1,234,567")
+pub fn fmt_num(n: impl std::fmt::Display) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}

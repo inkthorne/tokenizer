@@ -1,4 +1,5 @@
 use crate::error::{Result, TokenizerError};
+use crate::fmt_num;
 use crate::index::{ExactTokenIndex, IndexHeader, PathIndex, TokenIndex, TrigramIndex};
 use crate::tokenizer::{extract_exact_tokens_from_file, extract_tokens_from_file};
 use crate::trigram::extract_trigrams_from_file;
@@ -8,6 +9,7 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 use jwalk::WalkDir as JWalkDir;
 use walkdir::WalkDir;
 
@@ -205,6 +207,10 @@ pub fn scan_and_build_indexes(
     // Main thread: receive paths, assign IDs, dispatch to rayon workers
     let mut path_index = PathIndex::new(header.clone(), root.to_path_buf());
 
+    // Progress tracking
+    let progress_start = Instant::now();
+    let mut files_dispatched: u32 = 0;
+
     // Use rayon scope to spawn parallel workers
     rayon::scope(|s| {
         for path in path_rx {
@@ -219,6 +225,14 @@ pub fn scan_and_build_indexes(
                 let result = process_single_file(file_id, &path);
                 let _ = tx.send(result); // Ignore send errors if receiver dropped
             });
+
+            // Progress reporting
+            files_dispatched += 1;
+            if files_dispatched % 2500 == 0 {
+                let elapsed = progress_start.elapsed().as_secs_f64();
+                let rate = files_dispatched as f64 / elapsed;
+                println!("Indexed {} files ({:.0} files/sec)", fmt_num(files_dispatched), rate);
+            }
         }
     });
 
