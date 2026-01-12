@@ -1,6 +1,7 @@
 use crate::error::{Result, TokenizerError};
-use crate::index::TokenIndex;
-use crate::tokenizer::extract_tokens_from_file;
+use crate::index::{ExactTokenIndex, IndexHeader, PathIndex, TokenIndex, TrigramIndex};
+use crate::tokenizer::{extract_exact_tokens_from_file, extract_tokens_from_file};
+use crate::trigram::extract_trigrams_from_file;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashMap;
@@ -40,7 +41,7 @@ impl Default for ScanConfig {
     }
 }
 
-/// Scan a directory and build an index
+/// Scan a directory and build an index (legacy, single-file format)
 pub fn scan_and_index(root: &Path, config: &ScanConfig) -> Result<TokenIndex> {
     // Phase 1: Collect all file paths
     let files = collect_files(root, config)?;
@@ -53,6 +54,105 @@ pub fn scan_and_index(root: &Path, config: &ScanConfig) -> Result<TokenIndex> {
     let index = build_index_parallel(root, files, config.batch_size)?;
 
     Ok(index)
+}
+
+/// Scan a directory and build all three index types (paths, exact tokens, trigrams)
+pub fn scan_and_build_indexes(
+    root: &Path,
+    config: &ScanConfig,
+) -> Result<(PathIndex, ExactTokenIndex, TrigramIndex)> {
+    // Phase 1: Collect all file paths
+    let files = collect_files(root, config)?;
+
+    // Create shared header with same index_id for all three files
+    let header = IndexHeader::new();
+
+    if files.is_empty() {
+        return Ok((
+            PathIndex::new(header.clone(), root.to_path_buf()),
+            ExactTokenIndex::new(header.clone()),
+            TrigramIndex::new(header),
+        ));
+    }
+
+    // Phase 2: Build PathIndex FIRST to assign canonical file IDs
+    let mut path_index = PathIndex::new(header.clone(), root.to_path_buf());
+    let files_with_ids: Vec<(u32, PathBuf)> = files
+        .into_iter()
+        .map(|path| {
+            let id = path_index.register_file(path.clone());
+            (id, path)
+        })
+        .collect();
+
+    // Phase 3: Process files in parallel using the canonical IDs
+    let results: Vec<(FxHashMap<u64, Vec<u32>>, FxHashMap<u32, Vec<u32>>)> = files_with_ids
+        .par_chunks(config.batch_size)
+        .map(|chunk| {
+            let mut exact_map: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+            let mut trigram_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+
+            for (file_id, path) in chunk {
+                // Extract exact tokens
+                if let Ok(tokens) = extract_exact_tokens_from_file(path) {
+                    for token_hash in tokens {
+                        exact_map
+                            .entry(token_hash)
+                            .or_insert_with(Vec::new)
+                            .push(*file_id);
+                    }
+                }
+
+                // Extract trigrams
+                if let Ok(trigrams) = extract_trigrams_from_file(path) {
+                    for trigram in trigrams {
+                        trigram_map
+                            .entry(trigram)
+                            .or_insert_with(Vec::new)
+                            .push(*file_id);
+                    }
+                }
+            }
+
+            (exact_map, trigram_map)
+        })
+        .collect();
+
+    // Merge exact token maps
+    let mut merged_exact: FxHashMap<u64, RoaringBitmap> = FxHashMap::default();
+    for (exact_map, _) in &results {
+        for (token_hash, file_ids) in exact_map {
+            let bitmap = merged_exact
+                .entry(*token_hash)
+                .or_insert_with(RoaringBitmap::new);
+            for file_id in file_ids {
+                bitmap.insert(*file_id);
+            }
+        }
+    }
+
+    // Merge trigram maps
+    let mut merged_trigram: FxHashMap<u32, RoaringBitmap> = FxHashMap::default();
+    for (_, trigram_map) in &results {
+        for (trigram, file_ids) in trigram_map {
+            let bitmap = merged_trigram
+                .entry(*trigram)
+                .or_insert_with(RoaringBitmap::new);
+            for file_id in file_ids {
+                bitmap.insert(*file_id);
+            }
+        }
+    }
+
+    // Build exact token index (path_index already built in Phase 2)
+    let mut exact_index = ExactTokenIndex::new(header.clone());
+    exact_index.token_map = merged_exact;
+
+    // Build trigram index
+    let mut trigram_index = TrigramIndex::new(header);
+    trigram_index.trigram_map = merged_trigram;
+
+    Ok((path_index, exact_index, trigram_index))
 }
 
 /// Collect all files matching the configuration
@@ -173,6 +273,96 @@ fn build_index_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::{query_exact, query_fuzzy, QueryOptions};
+    use std::collections::HashSet;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_exact_and_fuzzy_file_ids_match() {
+        // Create temp directory with test files
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a file containing "alfred" token
+        let file1 = temp_dir.path().join("file1.txt");
+        std::fs::write(&file1, "hello alfred world").unwrap();
+
+        // Create another file with different content
+        let file2 = temp_dir.path().join("file2.txt");
+        std::fs::write(&file2, "foo bar baz").unwrap();
+
+        // Create a third file also containing "alfred"
+        let file3 = temp_dir.path().join("file3.txt");
+        std::fs::write(&file3, "alfred was here").unwrap();
+
+        // Build all three indexes
+        let config = ScanConfig::default();
+        let (path_index, exact_index, trigram_index) =
+            scan_and_build_indexes(temp_dir.path(), &config).unwrap();
+
+        let options = QueryOptions {
+            limit: None,
+            match_all: true,
+        };
+
+        // Query for "alfred" using both modes
+        let exact_result = query_exact(&path_index, &exact_index, "alfred", &options);
+        let fuzzy_result = query_fuzzy(&path_index, &trigram_index, "alfred", &options);
+
+        // Both should find files
+        assert!(!exact_result.files.is_empty(), "Exact should find files");
+        assert!(!fuzzy_result.files.is_empty(), "Fuzzy should find files");
+
+        // Exact results should be a subset of fuzzy results
+        // (fuzzy may match more due to case-insensitivity and substring matching)
+        let exact_set: HashSet<_> = exact_result.files.iter().collect();
+        let fuzzy_set: HashSet<_> = fuzzy_result.files.iter().collect();
+
+        for exact_file in &exact_set {
+            assert!(
+                fuzzy_set.contains(exact_file),
+                "Exact match {:?} not found in fuzzy results. Exact: {:?}, Fuzzy: {:?}",
+                exact_file,
+                exact_set,
+                fuzzy_set
+            );
+        }
+
+        // Verify we found the expected files (file1 and file3 contain "alfred")
+        assert_eq!(exact_result.files.len(), 2, "Should find exactly 2 files with 'alfred'");
+    }
+
+    #[test]
+    fn test_fuzzy_matches_partial_token() {
+        // Create temp directory with test files
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a file containing "alfred" token
+        let file1 = temp_dir.path().join("file1.txt");
+        std::fs::write(&file1, "hello alfred world").unwrap();
+
+        // Build all three indexes
+        let config = ScanConfig::default();
+        let (path_index, exact_index, trigram_index) =
+            scan_and_build_indexes(temp_dir.path(), &config).unwrap();
+
+        let options = QueryOptions {
+            limit: None,
+            match_all: true,
+        };
+
+        // Exact search for "alfred" should find the file
+        let exact_result = query_exact(&path_index, &exact_index, "alfred", &options);
+        assert_eq!(exact_result.files.len(), 1, "Exact 'alfred' should find 1 file");
+
+        // Fuzzy search for "lfred" (partial) should also find the file
+        // because "alfred" contains trigrams: alf, lfr, fre, red
+        // and "lfred" contains trigrams: lfr, fre, red
+        let fuzzy_result = query_fuzzy(&path_index, &trigram_index, "lfred", &options);
+        assert_eq!(fuzzy_result.files.len(), 1, "Fuzzy 'lfred' should find 1 file");
+
+        // Both should find the same file
+        assert_eq!(exact_result.files[0], fuzzy_result.files[0]);
+    }
 
     #[test]
     fn test_should_exclude() {

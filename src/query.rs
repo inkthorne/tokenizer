@@ -1,5 +1,6 @@
-use crate::index::TokenIndex;
-use crate::tokenizer::tokenize_query;
+use crate::index::{ExactTokenIndex, PathIndex, TokenIndex, TrigramIndex};
+use crate::tokenizer::{tokenize_query, tokenize_query_exact};
+use crate::trigram::extract_query_trigrams;
 use roaring::RoaringBitmap;
 use std::path::PathBuf;
 
@@ -99,6 +100,138 @@ pub fn query_with_options(
         matched_token_count,
     }
 }
+
+// ============================================================================
+// Exact Mode Query (uses ExactTokenIndex)
+// ============================================================================
+
+/// Execute an exact mode query (case-sensitive, preserves _ and -)
+pub fn query_exact(
+    path_index: &PathIndex,
+    exact_index: &ExactTokenIndex,
+    query_str: &str,
+    options: &QueryOptions,
+) -> QueryResult {
+    let token_hashes = tokenize_query_exact(query_str);
+    let query_token_count = token_hashes.len();
+
+    if token_hashes.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count: 0,
+            matched_token_count: 0,
+        };
+    }
+
+    // Collect bitmaps for each token
+    let bitmaps: Vec<&RoaringBitmap> = token_hashes
+        .iter()
+        .filter_map(|hash| exact_index.get_bitmap(*hash))
+        .collect();
+
+    let matched_token_count = bitmaps.len();
+
+    if bitmaps.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count,
+            matched_token_count: 0,
+        };
+    }
+
+    let result = if options.match_all {
+        intersect_bitmaps(&bitmaps)
+    } else {
+        union_bitmaps(&bitmaps)
+    };
+
+    let files = resolve_file_ids(path_index, &result, options.limit);
+
+    QueryResult {
+        files,
+        query_token_count,
+        matched_token_count,
+    }
+}
+
+// ============================================================================
+// Fuzzy Mode Query (uses TrigramIndex)
+// ============================================================================
+
+/// Execute a fuzzy mode query (case-insensitive trigrams)
+pub fn query_fuzzy(
+    path_index: &PathIndex,
+    trigram_index: &TrigramIndex,
+    query_str: &str,
+    options: &QueryOptions,
+) -> QueryResult {
+    let trigrams = extract_query_trigrams(query_str);
+    let query_token_count = trigrams.len();
+
+    if trigrams.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count: 0,
+            matched_token_count: 0,
+        };
+    }
+
+    // Collect bitmaps for each trigram
+    let bitmaps: Vec<&RoaringBitmap> = trigrams
+        .iter()
+        .filter_map(|trigram| trigram_index.get_bitmap(*trigram))
+        .collect();
+
+    let matched_token_count = bitmaps.len();
+
+    if bitmaps.is_empty() {
+        return QueryResult {
+            files: vec![],
+            query_token_count,
+            matched_token_count: 0,
+        };
+    }
+
+    // For fuzzy search, we typically want files that match MOST trigrams
+    // but not necessarily ALL (since partial matches are useful)
+    let result = if options.match_all {
+        intersect_bitmaps(&bitmaps)
+    } else {
+        union_bitmaps(&bitmaps)
+    };
+
+    let files = resolve_file_ids(path_index, &result, options.limit);
+
+    QueryResult {
+        files,
+        query_token_count,
+        matched_token_count,
+    }
+}
+
+/// Resolve file IDs to paths
+fn resolve_file_ids(
+    path_index: &PathIndex,
+    bitmap: &RoaringBitmap,
+    limit: Option<usize>,
+) -> Vec<PathBuf> {
+    if let Some(limit) = limit {
+        bitmap
+            .iter()
+            .take(limit)
+            .filter_map(|id| path_index.get_file_path(id))
+            .collect()
+    } else {
+        bitmap
+            .iter()
+            .filter_map(|id| path_index.get_file_path(id))
+            .collect()
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
 /// Intersect bitmaps, sorting by cardinality for efficiency
 fn intersect_bitmaps(bitmaps: &[&RoaringBitmap]) -> RoaringBitmap {

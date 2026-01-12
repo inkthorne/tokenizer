@@ -19,6 +19,12 @@ pub enum TokenizerError {
 
     #[error("Invalid glob pattern: {0}")]
     InvalidPattern(String),
+
+    #[error("Index files mismatch: {0}")]
+    IndexMismatch(String),
+
+    #[error("Missing query mode: must specify --exact or --fuzzy")]
+    MissingQueryMode,
 }
 
 impl From<std::io::Error> for TokenizerError {

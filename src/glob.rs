@@ -1,5 +1,5 @@
 use crate::error::{Result, TokenizerError};
-use crate::index::TokenIndex;
+use crate::index::{PathIndex, TokenIndex};
 use globset::Glob;
 use std::path::PathBuf;
 
@@ -21,6 +21,41 @@ pub struct GlobResult {
     pub files_scanned: usize,
 }
 
+/// Trait for index types that support glob file search
+pub trait GlobIndex {
+    fn file_count(&self) -> usize;
+    fn iter_filenames(&self) -> impl Iterator<Item = (u32, &str)>;
+    fn get_file_path(&self, file_id: u32) -> Option<PathBuf>;
+}
+
+impl GlobIndex for TokenIndex {
+    fn file_count(&self) -> usize {
+        TokenIndex::file_count(self)
+    }
+
+    fn iter_filenames(&self) -> impl Iterator<Item = (u32, &str)> {
+        TokenIndex::iter_filenames(self)
+    }
+
+    fn get_file_path(&self, file_id: u32) -> Option<PathBuf> {
+        TokenIndex::get_file_path(self, file_id)
+    }
+}
+
+impl GlobIndex for PathIndex {
+    fn file_count(&self) -> usize {
+        PathIndex::file_count(self)
+    }
+
+    fn iter_filenames(&self) -> impl Iterator<Item = (u32, &str)> {
+        PathIndex::iter_filenames(self)
+    }
+
+    fn get_file_path(&self, file_id: u32) -> Option<PathBuf> {
+        PathIndex::get_file_path(self, file_id)
+    }
+}
+
 /// Search indexed filenames using a glob pattern
 ///
 /// Matches against filenames only (not full paths).
@@ -30,7 +65,7 @@ pub struct GlobResult {
 /// - `*.rs` - matches all Rust files
 /// - `test_*.py` - matches Python test files
 /// - `*config*` - matches files containing "config"
-pub fn glob_files(index: &TokenIndex, pattern: &str, options: &GlobOptions) -> Result<GlobResult> {
+pub fn glob_files<I: GlobIndex>(index: &I, pattern: &str, options: &GlobOptions) -> Result<GlobResult> {
     let glob = Glob::new(pattern)
         .map_err(|e| TokenizerError::InvalidPattern(e.to_string()))?;
     let matcher = glob.compile_matcher();
