@@ -8,6 +8,7 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use jwalk::WalkDir as JWalkDir;
 use walkdir::WalkDir;
 
 /// Result from processing a single file in the streaming pipeline
@@ -66,28 +67,47 @@ pub fn scan_and_index(root: &Path, config: &ScanConfig) -> Result<TokenIndex> {
 }
 
 /// Walk directory and send discovered files through a channel (runs in dedicated thread)
+/// Uses jwalk for parallel directory traversal
 fn walk_and_send(
     root: PathBuf,
     config: ScanConfig,
     tx: mpsc::SyncSender<PathBuf>,
 ) -> Result<()> {
-    for entry in WalkDir::new(&root)
+    let exclude_patterns = config.exclude_patterns.clone();
+    let extensions = config.extensions.clone();
+    let max_file_size = config.max_file_size;
+
+    for entry in JWalkDir::new(&root)
+        .skip_hidden(false)
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !should_exclude(e.path(), &config.exclude_patterns))
+        .process_read_dir(move |_depth, _path, _state, children| {
+            // Filter out excluded directories in parallel (runs on rayon threads)
+            children.retain(|entry_result| {
+                if let Ok(entry) = entry_result {
+                    // Check if this is a directory we should exclude
+                    if let Some(file_name) = entry.file_name.to_str() {
+                        if exclude_patterns.iter().any(|p| file_name == p) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+        })
     {
         let entry = entry.map_err(|e| TokenizerError::WalkDir(e.to_string()))?;
 
-        if !entry.file_type().is_file() {
+        // Skip directories - only process files
+        if entry.file_type().is_dir() {
             continue;
         }
 
         let path = entry.path();
 
         // Check extension filter
-        if !config.extensions.is_empty() {
+        if !extensions.is_empty() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if !config.extensions.iter().any(|e| e == ext) {
+                if !extensions.iter().any(|e| e == ext) {
                     continue;
                 }
             } else {
@@ -95,9 +115,9 @@ fn walk_and_send(
             }
         }
 
-        // Check file size
+        // Check file size (metadata already fetched by jwalk)
         if let Ok(metadata) = entry.metadata() {
-            if metadata.len() > config.max_file_size {
+            if metadata.len() > max_file_size {
                 continue;
             }
         }
