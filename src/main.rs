@@ -48,33 +48,50 @@ enum Commands {
     },
 
     /// Query an existing index
+    #[command(visible_alias = "q", after_help = "\
+Examples:
+  tokenizer q Mannequin                      # exact match (default)
+  tokenizer q Mannequin -f                   # fuzzy match
+  tokenizer q \"bob dog\" -o                   # OR mode (either token)
+  tokenizer q Mannequin -p src               # paths containing \"src\"
+  tokenizer q Mannequin -g \"*.rs,*.h\"        # filter by glob
+  tokenizer q Mannequin -x test              # exclude \"test\"
+  tokenizer q Mannequin -p src -x test -l 10 # combined")]
     Query {
-        /// Index file path
-        #[arg(short, long, default_value = "index.tkix")]
-        index: PathBuf,
-
         /// Search query
         query: String,
+
+        /// Use fuzzy matching (trigrams, case-insensitive). Default is exact match.
+        #[arg(short = 'f', long)]
+        fuzzy: bool,
+
+        /// Filter to paths containing substring (e.g., "src", "FortniteGame")
+        #[arg(short = 'p', long)]
+        path: Option<String>,
+
+        /// Filter by glob patterns (comma-separated, e.g., "*.rs,*.h")
+        #[arg(short = 'g', long, value_delimiter = ',')]
+        glob: Option<Vec<String>>,
+
+        /// Exclude files matching pattern
+        #[arg(short = 'x', long)]
+        exclude: Option<String>,
 
         /// Maximum results to return
         #[arg(short, long)]
         limit: Option<usize>,
 
         /// Match any token (OR) instead of all tokens (AND)
-        #[arg(long)]
-        any: bool,
+        #[arg(short = 'o', long = "or")]
+        or_mode: bool,
+
+        /// Index file path
+        #[arg(short, long, default_value = "index.tkix")]
+        index: PathBuf,
 
         /// Use memory-mapped loading (faster for repeated queries)
         #[arg(long)]
         mmap: bool,
-
-        /// Exact match mode (case-sensitive, preserves _ and -)
-        #[arg(long, conflicts_with = "fuzzy")]
-        exact: bool,
-
-        /// Fuzzy match mode (case-insensitive trigrams)
-        #[arg(long, conflicts_with = "exact")]
-        fuzzy: bool,
     },
 
     /// Show index statistics
@@ -123,14 +140,16 @@ fn main() {
         }
 
         Commands::Query {
-            index,
             query,
-            limit,
-            any,
-            mmap,
-            exact,
             fuzzy,
-        } => cmd_query(index, query, limit, any, mmap, exact, fuzzy),
+            path,
+            glob,
+            exclude,
+            limit,
+            or_mode,
+            index,
+            mmap,
+        } => cmd_query(index, query, limit, or_mode, mmap, fuzzy, path, glob, exclude),
 
         Commands::Stats { index } => cmd_stats(index),
 
@@ -270,15 +289,14 @@ fn cmd_query(
     index_path: PathBuf,
     query_str: String,
     limit: Option<usize>,
-    any: bool,
+    or_mode: bool,
     use_mmap: bool,
-    exact: bool,
     fuzzy: bool,
+    path: Option<String>,
+    glob: Option<Vec<String>>,
+    exclude: Option<String>,
 ) -> tokenizer::Result<()> {
-    // Check which mode to use
-    if !exact && !fuzzy {
-        return Err(TokenizerError::MissingQueryMode);
-    }
+    // Default to exact mode (fuzzy = false means exact)
 
     // Check if we have the new split format or legacy format
     let has_split_format = paths_file(&index_path).exists();
@@ -307,7 +325,8 @@ fn cmd_query(
         let start = Instant::now();
         let options = QueryOptions {
             limit,
-            match_all: !any,
+            match_all: !or_mode,
+            ..Default::default()
         };
         let result = query_with_options(&index, &query_str, &options);
         let query_time = start.elapsed();
@@ -342,10 +361,13 @@ fn cmd_query(
 
     let options = QueryOptions {
         limit,
-        match_all: !any,
+        match_all: !or_mode,
+        path_contains: path,
+        glob_patterns: glob,
+        exclude,
     };
 
-    let (result, mode_str, tokens_load_time) = if exact {
+    let (result, mode_str, tokens_load_time) = if !fuzzy {
         let start = Instant::now();
         let exact_index = if use_mmap {
             load_exact_mmap(&exact_file(&index_path))?

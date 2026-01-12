@@ -25,6 +25,15 @@ pub struct QueryOptions {
 
     /// Require all tokens to match (AND) vs any token (OR)
     pub match_all: bool,
+
+    /// Filter to paths containing this substring
+    pub path_contains: Option<String>,
+
+    /// Filter by glob patterns (e.g., "*.rs", "*.h")
+    pub glob_patterns: Option<Vec<String>>,
+
+    /// Exclude files with paths containing this substring
+    pub exclude: Option<String>,
 }
 
 /// Execute a query against the index (AND mode by default)
@@ -35,6 +44,7 @@ pub fn query(index: &TokenIndex, query_str: &str) -> QueryResult {
         &QueryOptions {
             limit: None,
             match_all: true,
+            ..Default::default()
         },
     )
 }
@@ -145,7 +155,7 @@ pub fn query_exact(
         union_bitmaps(&bitmaps)
     };
 
-    let files = resolve_file_ids(path_index, &result, options.limit);
+    let files = resolve_file_ids(path_index, &result, options);
 
     QueryResult {
         files,
@@ -200,7 +210,7 @@ pub fn query_fuzzy(
         union_bitmaps(&bitmaps)
     };
 
-    let files = resolve_file_ids(path_index, &result, options.limit);
+    let files = resolve_file_ids(path_index, &result, options);
 
     QueryResult {
         files,
@@ -209,23 +219,65 @@ pub fn query_fuzzy(
     }
 }
 
-/// Resolve file IDs to paths
+/// Resolve file IDs to paths with optional filtering
 fn resolve_file_ids(
     path_index: &PathIndex,
     bitmap: &RoaringBitmap,
-    limit: Option<usize>,
+    options: &QueryOptions,
 ) -> Vec<PathBuf> {
-    if let Some(limit) = limit {
-        bitmap
-            .iter()
-            .take(limit)
-            .filter_map(|id| path_index.get_file_path(id))
-            .collect()
+    // Build glob matcher if patterns provided
+    let glob_matcher = options.glob_patterns.as_ref().and_then(|patterns| {
+        let mut builder = globset::GlobSetBuilder::new();
+        for pattern in patterns {
+            // Make patterns case-insensitive
+            if let Ok(glob) = globset::GlobBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+            {
+                builder.add(glob);
+            }
+        }
+        builder.build().ok()
+    });
+
+    let iter = bitmap.iter().filter_map(|id| {
+        let path = path_index.get_file_path(id)?;
+        let path_str = path.to_string_lossy();
+        let path_lower = path_str.to_lowercase();
+
+        // Check path_contains filter (case-insensitive)
+        if let Some(ref contains) = options.path_contains {
+            if !path_lower.contains(&contains.to_lowercase()) {
+                return None;
+            }
+        }
+
+        // Check glob patterns
+        if let Some(ref matcher) = glob_matcher {
+            // Match against filename only
+            if let Some(filename) = path.file_name() {
+                if !matcher.is_match(filename) {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+
+        // Check exclude filter (case-insensitive)
+        if let Some(ref exclude) = options.exclude {
+            if path_lower.contains(&exclude.to_lowercase()) {
+                return None;
+            }
+        }
+
+        Some(path)
+    });
+
+    if let Some(limit) = options.limit {
+        iter.take(limit).collect()
     } else {
-        bitmap
-            .iter()
-            .filter_map(|id| path_index.get_file_path(id))
-            .collect()
+        iter.collect()
     }
 }
 

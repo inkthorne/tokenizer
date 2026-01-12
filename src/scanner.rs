@@ -397,6 +397,7 @@ mod tests {
         let options = QueryOptions {
             limit: None,
             match_all: true,
+            ..Default::default()
         };
 
         // Query for "alfred" using both modes
@@ -443,6 +444,7 @@ mod tests {
         let options = QueryOptions {
             limit: None,
             match_all: true,
+            ..Default::default()
         };
 
         // Exact search for "alfred" should find the file
