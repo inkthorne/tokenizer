@@ -6,7 +6,16 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use walkdir::WalkDir;
+
+/// Result from processing a single file in the streaming pipeline
+struct FileProcessingResult {
+    file_id: u32,
+    exact_tokens: Vec<u64>,
+    trigrams: Vec<u32>,
+}
 
 /// Configuration for scanning
 #[derive(Debug, Clone)]
@@ -56,101 +65,153 @@ pub fn scan_and_index(root: &Path, config: &ScanConfig) -> Result<TokenIndex> {
     Ok(index)
 }
 
+/// Walk directory and send discovered files through a channel (runs in dedicated thread)
+fn walk_and_send(
+    root: PathBuf,
+    config: ScanConfig,
+    tx: mpsc::SyncSender<PathBuf>,
+) -> Result<()> {
+    for entry in WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !should_exclude(e.path(), &config.exclude_patterns))
+    {
+        let entry = entry.map_err(|e| TokenizerError::WalkDir(e.to_string()))?;
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        // Check extension filter
+        if !config.extensions.is_empty() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if !config.extensions.iter().any(|e| e == ext) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        // Check file size
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.len() > config.max_file_size {
+                continue;
+            }
+        }
+
+        // Send to coordinator (blocks if channel full = backpressure)
+        if tx.send(path.to_path_buf()).is_err() {
+            // Receiver dropped, stop walking
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Process a single file and extract tokens + trigrams
+fn process_single_file(file_id: u32, path: &Path) -> FileProcessingResult {
+    let exact_tokens = extract_exact_tokens_from_file(path).unwrap_or_default();
+    let trigrams = extract_trigrams_from_file(path).unwrap_or_default();
+
+    FileProcessingResult {
+        file_id,
+        exact_tokens,
+        trigrams,
+    }
+}
+
+/// Merge all streaming results into final indexes
+fn merge_results(
+    rx: mpsc::Receiver<FileProcessingResult>,
+    header: IndexHeader,
+) -> (ExactTokenIndex, TrigramIndex) {
+    let mut exact_map: FxHashMap<u64, RoaringBitmap> = FxHashMap::default();
+    let mut trigram_map: FxHashMap<u32, RoaringBitmap> = FxHashMap::default();
+
+    for result in rx {
+        for token_hash in result.exact_tokens {
+            exact_map
+                .entry(token_hash)
+                .or_insert_with(RoaringBitmap::new)
+                .insert(result.file_id);
+        }
+
+        for trigram in result.trigrams {
+            trigram_map
+                .entry(trigram)
+                .or_insert_with(RoaringBitmap::new)
+                .insert(result.file_id);
+        }
+    }
+
+    let mut exact_index = ExactTokenIndex::new(header.clone());
+    exact_index.token_map = exact_map;
+
+    let mut trigram_index = TrigramIndex::new(header);
+    trigram_index.trigram_map = trigram_map;
+
+    (exact_index, trigram_index)
+}
+
 /// Scan a directory and build all three index types (paths, exact tokens, trigrams)
+///
+/// Uses a streaming pipeline that processes files as they're discovered,
+/// rather than collecting all files first. This provides better performance
+/// on large directories by overlapping discovery with processing.
 pub fn scan_and_build_indexes(
     root: &Path,
     config: &ScanConfig,
 ) -> Result<(PathIndex, ExactTokenIndex, TrigramIndex)> {
-    // Phase 1: Collect all file paths
-    let files = collect_files(root, config)?;
-
     // Create shared header with same index_id for all three files
     let header = IndexHeader::new();
 
-    if files.is_empty() {
-        return Ok((
-            PathIndex::new(header.clone(), root.to_path_buf()),
-            ExactTokenIndex::new(header.clone()),
-            TrigramIndex::new(header),
-        ));
-    }
+    // Channel for discovered files (bounded for backpressure)
+    let (path_tx, path_rx) = mpsc::sync_channel::<PathBuf>(1024);
 
-    // Phase 2: Build PathIndex FIRST to assign canonical file IDs
+    // Channel for processing results
+    let (result_tx, result_rx) = mpsc::channel::<FileProcessingResult>();
+
+    // Clone config and root for the walker thread
+    let walker_config = config.clone();
+    let walker_root = root.to_path_buf();
+
+    // Spawn walker thread - discovers files and sends through channel
+    let walker_handle = thread::spawn(move || walk_and_send(walker_root, walker_config, path_tx));
+
+    // Main thread: receive paths, assign IDs, dispatch to rayon workers
     let mut path_index = PathIndex::new(header.clone(), root.to_path_buf());
-    let files_with_ids: Vec<(u32, PathBuf)> = files
-        .into_iter()
-        .map(|path| {
-            let id = path_index.register_file(path.clone());
-            (id, path)
-        })
-        .collect();
 
-    // Phase 3: Process files in parallel using the canonical IDs
-    let results: Vec<(FxHashMap<u64, Vec<u32>>, FxHashMap<u32, Vec<u32>>)> = files_with_ids
-        .par_chunks(config.batch_size)
-        .map(|chunk| {
-            let mut exact_map: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
-            let mut trigram_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    // Use rayon scope to spawn parallel workers
+    rayon::scope(|s| {
+        for path in path_rx {
+            // Sequential: register file and get canonical ID
+            let file_id = path_index.register_file(path.clone());
 
-            for (file_id, path) in chunk {
-                // Extract exact tokens
-                if let Ok(tokens) = extract_exact_tokens_from_file(path) {
-                    for token_hash in tokens {
-                        exact_map
-                            .entry(token_hash)
-                            .or_insert_with(Vec::new)
-                            .push(*file_id);
-                    }
-                }
+            // Clone sender for this task
+            let tx = result_tx.clone();
 
-                // Extract trigrams
-                if let Ok(trigrams) = extract_trigrams_from_file(path) {
-                    for trigram in trigrams {
-                        trigram_map
-                            .entry(trigram)
-                            .or_insert_with(Vec::new)
-                            .push(*file_id);
-                    }
-                }
-            }
-
-            (exact_map, trigram_map)
-        })
-        .collect();
-
-    // Merge exact token maps
-    let mut merged_exact: FxHashMap<u64, RoaringBitmap> = FxHashMap::default();
-    for (exact_map, _) in &results {
-        for (token_hash, file_ids) in exact_map {
-            let bitmap = merged_exact
-                .entry(*token_hash)
-                .or_insert_with(RoaringBitmap::new);
-            for file_id in file_ids {
-                bitmap.insert(*file_id);
-            }
+            // Spawn parallel work - processing starts immediately
+            s.spawn(move |_| {
+                let result = process_single_file(file_id, &path);
+                let _ = tx.send(result); // Ignore send errors if receiver dropped
+            });
         }
-    }
+    });
 
-    // Merge trigram maps
-    let mut merged_trigram: FxHashMap<u32, RoaringBitmap> = FxHashMap::default();
-    for (_, trigram_map) in &results {
-        for (trigram, file_ids) in trigram_map {
-            let bitmap = merged_trigram
-                .entry(*trigram)
-                .or_insert_with(RoaringBitmap::new);
-            for file_id in file_ids {
-                bitmap.insert(*file_id);
-            }
-        }
-    }
+    // Drop the original sender so merge_results knows when all work is done
+    drop(result_tx);
 
-    // Build exact token index (path_index already built in Phase 2)
-    let mut exact_index = ExactTokenIndex::new(header.clone());
-    exact_index.token_map = merged_exact;
+    // Wait for walker thread to complete and propagate any errors
+    walker_handle
+        .join()
+        .map_err(|_| TokenizerError::WalkDir("Walker thread panicked".to_string()))??;
 
-    // Build trigram index
-    let mut trigram_index = TrigramIndex::new(header);
-    trigram_index.trigram_map = merged_trigram;
+    // Collect and merge all results into final indexes
+    let (exact_index, trigram_index) = merge_results(result_rx, header);
 
     Ok((path_index, exact_index, trigram_index))
 }
