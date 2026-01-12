@@ -164,7 +164,7 @@ fn cmd_index(
     }
 
     if let Some(excl) = exclude {
-        config.exclude_patterns = excl;
+        config.exclude_patterns.extend(excl);
     }
 
     config.max_file_size = max_size * 1024 * 1024;
@@ -234,7 +234,7 @@ fn cmd_index_legacy(
     }
 
     if let Some(excl) = exclude {
-        config.exclude_patterns = excl;
+        config.exclude_patterns.extend(excl);
     }
 
     config.max_file_size = max_size * 1024 * 1024;

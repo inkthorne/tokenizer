@@ -1,6 +1,6 @@
 use crate::error::{Result, TokenizerError};
 use crate::index::{PathIndex, TokenIndex};
-use globset::Glob;
+use globset::GlobBuilder;
 use std::path::PathBuf;
 
 /// Options for glob file search
@@ -66,7 +66,9 @@ impl GlobIndex for PathIndex {
 /// - `test_*.py` - matches Python test files
 /// - `*config*` - matches files containing "config"
 pub fn glob_files<I: GlobIndex>(index: &I, pattern: &str, options: &GlobOptions) -> Result<GlobResult> {
-    let glob = Glob::new(pattern)
+    let glob = GlobBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
         .map_err(|e| TokenizerError::InvalidPattern(e.to_string()))?;
     let matcher = glob.compile_matcher();
 

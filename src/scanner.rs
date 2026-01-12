@@ -88,7 +88,7 @@ fn walk_and_send(
                 if let Ok(entry) = entry_result {
                     // Check if this is a directory we should exclude
                     if let Some(file_name) = entry.file_name.to_str() {
-                        if exclude_patterns.iter().any(|p| file_name == p) {
+                        if exclude_patterns.iter().any(|p| file_name.eq_ignore_ascii_case(p)) {
                             return false;
                         }
                     }
@@ -296,7 +296,7 @@ fn should_exclude(path: &Path, patterns: &[String]) -> bool {
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             if let Some(name_str) = name.to_str() {
-                if patterns.iter().any(|p| name_str == p) {
+                if patterns.iter().any(|p| name_str.eq_ignore_ascii_case(p)) {
                     return true;
                 }
             }
@@ -472,6 +472,16 @@ mod tests {
             &patterns
         ));
         assert!(!should_exclude(Path::new("/project/src/main.rs"), &patterns));
+
+        // Case-insensitive matching
+        assert!(should_exclude(
+            Path::new("/project/.GIT/config"),
+            &patterns
+        ));
+        assert!(should_exclude(
+            Path::new("/project/Node_Modules/pkg"),
+            &patterns
+        ));
     }
 
     #[test]
