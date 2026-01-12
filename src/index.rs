@@ -140,6 +140,22 @@ impl TokenIndex {
     pub fn directory_count(&self) -> usize {
         self.directories.len()
     }
+
+    /// Iterate over all files, yielding (file_id, full_path) pairs
+    pub fn iter_files(&self) -> impl Iterator<Item = (u32, PathBuf)> + '_ {
+        self.files.iter().enumerate().map(|(idx, (dir_id, filename))| {
+            let dir = &self.directories[*dir_id as usize];
+            (idx as u32, dir.join(filename))
+        })
+    }
+
+    /// Iterate over all filenames only (without directory path)
+    pub fn iter_filenames(&self) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(idx, (_, filename))| (idx as u32, filename.as_str()))
+    }
 }
 
 #[cfg(test)]

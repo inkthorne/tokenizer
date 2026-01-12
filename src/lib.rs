@@ -26,6 +26,7 @@
 //! ```
 
 mod error;
+mod glob;
 mod index;
 mod persistence;
 mod query;
@@ -34,6 +35,7 @@ mod tokenizer;
 
 // Re-export public API
 pub use error::{Result, TokenizerError};
+pub use glob::{glob_files, GlobOptions, GlobResult};
 pub use index::{IndexMetadata, TokenIndex};
 pub use persistence::{index_exists, load_index, load_index_mmap, save_index};
 pub use query::{query, query_with_options, QueryOptions, QueryResult};

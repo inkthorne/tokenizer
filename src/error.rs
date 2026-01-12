@@ -16,6 +16,9 @@ pub enum TokenizerError {
 
     #[error("Index not found: {0}")]
     IndexNotFound(String),
+
+    #[error("Invalid glob pattern: {0}")]
+    InvalidPattern(String),
 }
 
 impl From<std::io::Error> for TokenizerError {
