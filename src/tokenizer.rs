@@ -505,4 +505,97 @@ mod tests {
         let partial_query = tokenize_query_exact("process");
         assert!(!content_tokens.contains(&partial_query[0]));
     }
+
+    // ========================================================================
+    // Tests for case-insensitive exact mode (-i flag)
+    // ========================================================================
+
+    #[test]
+    fn test_hash_token_lower_case_insensitive() {
+        // All case variants should produce the same hash
+        let hash_lower = hash_token_lower(b"hello");
+        let hash_upper = hash_token_lower(b"HELLO");
+        let hash_mixed = hash_token_lower(b"HeLLo");
+
+        assert_eq!(hash_lower, hash_upper);
+        assert_eq!(hash_upper, hash_mixed);
+    }
+
+    #[test]
+    fn test_hash_token_lower_preserves_non_alpha() {
+        // Non-alphabetic characters should be preserved
+        let hash1 = hash_token_lower(b"test_123");
+        let hash2 = hash_token_lower(b"TEST_123");
+        let hash3 = hash_token_lower(b"Test_123");
+
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash2, hash3);
+    }
+
+    #[test]
+    fn test_hash_token_lower_differs_from_hash_token() {
+        // hash_token_lower and hash_token produce different results for uppercase
+        // because hash_token preserves case and hash_token_lower lowercases
+        let lower_hash = hash_token_lower(b"HELLO");
+        let regular_hash = hash_token(b"HELLO");
+        assert_ne!(lower_hash, regular_hash);
+
+        // hash_token_lower("HELLO") should equal hash_token_lower("hello")
+        let lower_hash2 = hash_token_lower(b"hello");
+        assert_eq!(lower_hash, lower_hash2);
+    }
+
+    #[test]
+    fn test_tokenize_exact_lower_basic() {
+        let content = b"Hello_World MyVar";
+        let tokens: Vec<_> = tokenize_exact_lower(content).collect();
+
+        // Should have 2 tokens: hello_world, myvar (lowercased)
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[test]
+    fn test_tokenize_exact_lower_case_insensitive_match() {
+        let content = b"ProcessData InputBuffer";
+        let content_tokens: FxHashSet<_> = tokenize_exact_lower(content).collect();
+
+        // Query with different cases should all match
+        let query_lower = tokenize_query_exact_lower("processdata");
+        let query_upper = tokenize_query_exact_lower("PROCESSDATA");
+        let query_mixed = tokenize_query_exact_lower("ProcessData");
+
+        assert!(content_tokens.contains(&query_lower[0]));
+        assert!(content_tokens.contains(&query_upper[0]));
+        assert!(content_tokens.contains(&query_mixed[0]));
+
+        // All queries should produce the same hash
+        assert_eq!(query_lower[0], query_upper[0]);
+        assert_eq!(query_upper[0], query_mixed[0]);
+    }
+
+    #[test]
+    fn test_tokenize_exact_lower_preserves_structure() {
+        // tokenize_exact_lower should preserve underscores and hyphens like tokenize_exact
+        let content = b"my_var other-arg";
+        let lower_tokens: Vec<_> = tokenize_exact_lower(content).collect();
+
+        // Should have 2 tokens (preserving structure)
+        assert_eq!(lower_tokens.len(), 2);
+
+        // Legacy tokenize would split on underscores/hyphens
+        let legacy_tokens: Vec<_> = tokenize(content).collect();
+        assert_eq!(legacy_tokens.len(), 4); // my, var, other, arg
+    }
+
+    #[test]
+    fn test_tokenize_query_exact_lower() {
+        // tokenize_query_exact_lower should produce lowercase hashes
+        let query1 = tokenize_query_exact_lower("MyFunction");
+        let query2 = tokenize_query_exact_lower("myfunction");
+        let query3 = tokenize_query_exact_lower("MYFUNCTION");
+
+        assert_eq!(query1.len(), 1);
+        assert_eq!(query1, query2);
+        assert_eq!(query2, query3);
+    }
 }
